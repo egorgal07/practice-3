@@ -13,7 +13,7 @@ jobs:
 
     defaults:
       run:
-        shell: powershell
+        shell: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"'
 
     steps:
       - name: Получить файлы проекта
@@ -25,13 +25,18 @@ jobs:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Path evidence -Force | Out-Null
+
           $lines = foreach ($name in 'DB_NAME', 'DB_USER', 'DB_PASSWORD') {
             $value = [Environment]::GetEnvironmentVariable($name)
-            if ([string]::IsNullOrEmpty($value)) { throw "Missing secret $name" }
+            if ([string]::IsNullOrEmpty($value)) {
+              throw "Missing GitHub secret: $name"
+            }
             $escaped = $value.Replace("'", "\'")
             "$name='$escaped'"
           }
+
           [IO.File]::WriteAllLines((Join-Path $PWD '.env'), [string[]]$lines)
           @('DB_NAME=***', 'DB_USER=***', 'DB_PASSWORD=***') |
             Set-Content evidence/env-masked.txt
@@ -42,8 +47,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Docker Compose failed to start' }
 
       - name: Сравнить данные PostgreSQL и приложения
+        env:
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
         run: |
+          $ErrorActionPreference = 'Stop'
           $response = $null
+
           for ($attempt = 0; $attempt -lt 15; $attempt++) {
             try {
               $response = Invoke-WebRequest -UseBasicParsing `
@@ -55,21 +65,25 @@ jobs:
           }
           if ($null -eq $response) { throw 'The API did not respond' }
 
-          $sql = 'SELECT id, name FROM items ORDER BY id'
-          $rows = $sql | docker compose exec -T db sh -c 'psql -X -A -t -F "|" -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+          $sql = "SELECT json_build_object('id', id, 'name', name) FROM items ORDER BY id;"
+          $rows = $sql | docker compose exec -T db psql -X -A -t `
+            -v ON_ERROR_STOP=1 -U $env:DB_USER -d $env:DB_NAME
           if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL query failed' }
 
-          $expected = @($rows | Where-Object { $_ -ne '' })
-          $actual = @(
-            $response.Content | ConvertFrom-Json |
-              ForEach-Object { "$($_.id)|$($_.name)" }
-          )
+          $expected = @($rows | Where-Object { $_ } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
+          $actual = @(ConvertFrom-Json -InputObject $response.Content)
           if ($expected.Count -eq 0) { throw 'The items table is empty' }
-          if (($expected -join "`n") -cne ($actual -join "`n")) {
-            throw 'The API items differ from PostgreSQL'
+          if ($expected.Count -ne $actual.Count) { throw 'Item counts differ' }
+
+          for ($index = 0; $index -lt $expected.Count; $index++) {
+            if (($expected[$index].id -ne $actual[$index].id) -or
+                ($expected[$index].name -cne $actual[$index].name)) {
+              throw "API and PostgreSQL differ at row $($index + 1)"
+            }
           }
 
-          $page = Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost:8080/' -TimeoutSec 5
+          $page = Invoke-WebRequest -UseBasicParsing `
+            -Uri 'http://localhost:8080/' -TimeoutSec 5
           "PASS: PostgreSQL and /api/items returned the same $($actual.Count) records. Web page HTTP $($page.StatusCode)." |
             Tee-Object -FilePath evidence/test-results.txt
 
@@ -77,11 +91,11 @@ jobs:
         if: always()
         run: |
           New-Item -ItemType Directory -Path evidence -Force | Out-Null
-          if (Test-Path .env) {
+          if (Test-Path -LiteralPath .env) {
             docker compose ps -a | Out-File evidence/docker-ps.txt
             docker compose logs --no-color | Out-File evidence/docker-logs.txt
           }
-          if (!(Test-Path evidence/test-results.txt)) {
+          if (!(Test-Path -LiteralPath evidence/test-results.txt)) {
             'Checks did not complete. See the failed step in GitHub Actions.' |
               Set-Content evidence/test-results.txt
           }
@@ -96,9 +110,11 @@ jobs:
       - name: Остановить контейнеры и удалить временный .env
         if: always()
         run: |
-          if (Test-Path .env) {
-            docker compose down
-            $composeExit = $LASTEXITCODE
-            Remove-Item -LiteralPath .env
-            if ($composeExit -ne 0) { throw 'Docker Compose cleanup failed' }
+          if (Test-Path -LiteralPath .env) {
+            try {
+              docker compose down
+              if ($LASTEXITCODE -ne 0) { throw 'Docker Compose cleanup failed' }
+            } finally {
+              Remove-Item -LiteralPath .env -ErrorAction Stop
+            }
           }
