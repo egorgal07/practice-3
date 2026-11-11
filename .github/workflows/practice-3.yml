@@ -1,0 +1,12 @@
+name: Practice 3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-runner:
+    runs-on: [self-hosted, Windows]
+    steps:
+      - name: Check Docker Compose
+        shell: powershell
+        run: docker compose version
