@@ -44,7 +44,9 @@ jobs:
       - name: Запустить контейнеры
         run: |
           docker compose up -d --build --wait --wait-timeout 90
-          if ($LASTEXITCODE -ne 0) { throw 'Docker Compose failed to start' }
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Docker Compose failed to start'
+          }
 
       - name: Сравнить данные PostgreSQL и приложения
         env:
@@ -63,17 +65,33 @@ jobs:
               Start-Sleep -Seconds 2
             }
           }
-          if ($null -eq $response) { throw 'The API did not respond' }
+
+          if ($null -eq $response) {
+            throw 'The API did not respond'
+          }
 
           $sql = "SELECT json_build_object('id', id, 'name', name) FROM items ORDER BY id;"
           $rows = $sql | docker compose exec -T db psql -X -A -t `
             -v ON_ERROR_STOP=1 -U $env:DB_USER -d $env:DB_NAME
-          if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL query failed' }
+          if ($LASTEXITCODE -ne 0) {
+            throw 'PostgreSQL query failed'
+          }
 
-          $expected = @($rows | Where-Object { $_ } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
-          $actual = @(ConvertFrom-Json -InputObject $response.Content)
-          if ($expected.Count -eq 0) { throw 'The items table is empty' }
-          if ($expected.Count -ne $actual.Count) { throw 'Item counts differ' }
+          $expected = @(
+            $rows | Where-Object { $_ } | ForEach-Object {
+              ConvertFrom-Json -InputObject $_
+            }
+          )
+
+          $parsed = ConvertFrom-Json -InputObject $response.Content
+          $actual = @($parsed)
+
+          if ($expected.Count -eq 0) {
+            throw 'The items table is empty'
+          }
+          if ($expected.Count -ne $actual.Count) {
+            throw "Item counts differ: PostgreSQL=$($expected.Count), API=$($actual.Count)"
+          }
 
           for ($index = 0; $index -lt $expected.Count; $index++) {
             if (($expected[$index].id -ne $actual[$index].id) -or
@@ -91,10 +109,12 @@ jobs:
         if: always()
         run: |
           New-Item -ItemType Directory -Path evidence -Force | Out-Null
+
           if (Test-Path -LiteralPath .env) {
             docker compose ps -a | Out-File evidence/docker-ps.txt
             docker compose logs --no-color | Out-File evidence/docker-logs.txt
           }
+
           if (!(Test-Path -LiteralPath evidence/test-results.txt)) {
             'Checks did not complete. See the failed step in GitHub Actions.' |
               Set-Content evidence/test-results.txt
@@ -113,7 +133,9 @@ jobs:
           if (Test-Path -LiteralPath .env) {
             try {
               docker compose down
-              if ($LASTEXITCODE -ne 0) { throw 'Docker Compose cleanup failed' }
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Docker Compose cleanup failed'
+              }
             } finally {
               Remove-Item -LiteralPath .env -ErrorAction Stop
             }
