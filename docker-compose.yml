@@ -1,0 +1,53 @@
+services:
+  app:
+    # image не нужен: он избыточен, раз есть build (Compose сам назовёт образ <проект>-app)
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"            # наружу выставлено ТОЛЬКО веб-приложение
+    environment:
+      HTTP_PORT: "8080"
+      STATIC_DIR: /app/static
+      DB_HOST: db              # имя сервиса = DNS-имя в сети Compose
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER}      # значения берутся из .env, в файле их нет
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+    volumes:
+      # 2) bind mount: папка хоста -> контейнер, только для чтения
+      - ./frontend:/app/static:ro
+    depends_on:
+      db:
+        condition: service_healthy   # ждём, пока БД реально готова
+    restart: unless-stopped
+    networks:
+      - app_net
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    # ports отсутствует: БД доступна только внутри app_net
+    healthcheck:
+      # $$ - чтобы переменные раскрывались внутри контейнера, а не в Compose
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    volumes:
+      # 1) именованный том: данные БД переживают docker compose down
+      - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - app_net
+
+volumes:
+  db_data:
+
+networks:
+  app_net:
+    driver: bridge
